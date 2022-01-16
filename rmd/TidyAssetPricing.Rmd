@@ -1,0 +1,568 @@
+---
+title: "Tidy Asset Pricing"
+output:
+  prettydoc::html_pretty:
+    theme: cayman
+    highlight: NA
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+This note is a replication of [Tidy Asset Pricing](https://christophscheuch.github.io/post/asset-pricing/crsp-sample/) by Christoph Scheuch.
+
+# Part I: The CRSP Sample 
+- Packages
+```{r}
+pacman::p_load(tidyverse, scales, viridis, vroom,
+               lubridate, here, slider, moments, 
+               corrr, kableExtra, broom, sandwich,
+               matsuno, FamaFrench)
+```
+
+- Load data
+```{r}
+tbl.crsp_msf <- vroom(file = here("input/CRSP_msf.csv"),
+                      col_types = cols(.default = col_character()),
+                      col_select = c(PERMNO, date, RET, SHROUT, ALTPRC,
+                                     EXCHCD, SHRCD, SICCD, DLRET, DLSTCD))
+colnames(tbl.crsp_msf) <- str_to_lower(colnames(tbl.crsp_msf))
+```
+
+- Make sure that all relevant vars are correctly parsed
+```{r}
+tbl.crsp_monthly <- tbl.crsp_msf %>% 
+  transmute(permno = as.integer(permno),       # security identifier
+            date = ymd(date),                  # date of the observation
+            month = floor_date(date, "month"), # month identifier
+            ret = as.numeric(ret) * 100,       # return (in percent)
+            shrout = as.numeric(shrout),       # shares outstanding (in thousands)
+            altprc = as.numeric(altprc),       # last traded price in a month
+            exchcd = as.integer(exchcd),       # exchange code
+            shrcd = as.integer(shrcd),         # share code
+            siccd = as.integer(siccd),         # industry code
+            dlret = as.numeric(dlret) * 100,   # delisting return (in percent)
+            dlstcd = as.integer(dlstcd)        # delisting code
+  )
+rm(tbl.crsp_msf)
+```
+
+- Focus on US-based common stocks
+```{r}
+tbl.crsp_monthly <- tbl.crsp_monthly %>% 
+  filter(shrcd %in% c(10, 11))
+```
+
+- Remove duplicates
+```{r}
+NROW(tbl.crsp_monthly)
+tbl.crsp_montly_duplicate <- tbl.crsp_monthly %>%
+  group_by_all() %>%
+  filter(n() > 1) %>% 
+  ungroup()
+cat("The number of duplicated records are " %+%
+      NROW(tbl.crsp_montly_duplicate))
+cat("The percentage of duplicated records are " %+% 
+      (round(NROW(tbl.crsp_montly_duplicate)/NROW(tbl.crsp_monthly), 4) * 100) %+% "%")
+
+# remove duplicates 
+tbl.crsp_monthly <- tbl.crsp_monthly %>% 
+  distinct(permno, date, .keep_all = TRUE)
+```
+
+- Compute market cap.
+  - `shrout` is in thousands, so`mktcap` is in millions of dollars.
+  - We adjust the market cap by cpi.
+```{r}
+tbl.crsp_monthly <- tbl.crsp_monthly %>% 
+  mutate(mktcap = abs(shrout * altprc) / 1000,
+         mktcap = if_else(mktcap == 0, NA_real_, mktcap))
+
+tbl.cpi_raw <- readr::read_csv(here("input/CPIAUCNS.csv"))
+
+tbl.cpi <- tbl.cpi_raw %>% 
+  filter(DATE <= max(tbl.crsp_monthly$date)) %>% 
+  transmute(month = floor_date(DATE, "month"),
+            cpi = CPIAUCNS) %>% 
+  arrange(month) %>% 
+  mutate(cpi = cpi/last(cpi))
+
+tbl.crsp_monthly <- tbl.crsp_monthly %>% 
+  left_join(tbl.cpi, by = c("month")) %>% 
+  mutate(mktcap_cpi = mktcap / cpi)
+```
+
+- Create stock exchange category.
+  - The value `3*` means when-issued trading
+```{r}
+tbl.crsp_monthly <- tbl.crsp_monthly %>% 
+  mutate(exchange = case_when(exchcd %in% c(1, 31) ~ "NYSE",
+                              exchcd %in% c(2, 32) ~ "AMEX",
+                              exchcd %in% c(3, 33) ~ "NASDAQ",
+                              TRUE ~ "other"))
+```
+
+- Number of securities by exchange
+```{r}
+fig.securities <- tbl.crsp_monthly %>% 
+  group_by(exchange, date) %>% 
+  summarise(n = n(), mktcap_cpi = mean(mktcap_cpi, na.rm = TRUE)) %>% 
+  ungroup() %>% 
+  ggplot(aes(date, n, colour = exchange, linetype = exchange)) +
+  geom_point(aes(size = mktcap_cpi)) +
+  labs(x = NULL, y = NULL, color = NULL, linetype = NULL,
+       title = "Montly number of securities by exchange") + 
+  scale_x_date(expand = c(0, 0), date_breaks = "10 years", date_labels = "%Y") +
+  scale_y_continuous(labels = comma, breaks = pretty_breaks()) +
+  theme_classic() +
+  scale_color_viridis_d()
+fig.securities
+```
+
+- Industry variable by CPI
+```{r}
+tbl.crsp_monthly <- tbl.crsp_monthly %>%
+  mutate(industry = case_when(
+    siccd >= 1 & siccd <= 999 ~ "Agriculture",
+    siccd >= 1000 & siccd <= 1499 ~ "Mining",
+    siccd >= 1500 & siccd <= 1799 ~ "Construction",
+    siccd >= 2000 & siccd <= 3999 ~ "Manufacturing",
+    siccd >= 4000 & siccd <= 4999 ~ "Transportation",
+    siccd >= 5000 & siccd <= 5199 ~ "Wholesale",
+    siccd >= 5200 & siccd <= 5999 ~ "Retail",
+    siccd >= 6000 & siccd <= 6799 ~ "Finance",
+    siccd >= 7000 & siccd <= 8999 ~ "Services",
+    siccd >= 9000 & siccd <= 9999 ~ "Public",
+    TRUE ~ "Missing"))
+```
+
+- Industry distribution
+```{r}
+fig.industries <- tbl.crsp_monthly %>% 
+  filter(!is.na(industry)) %>% 
+  count(industry, date) %>% 
+  ggplot(aes(date, n, color = industry, linetype = industry)) + 
+  geom_line(size = 1) +
+  labs(x = NULL, y = NULL, color = NULL, linetype = NULL, 
+       title = "Montly number of securities by industry") +
+  scale_x_date(expand = c(0, 0), date_breaks = "10 years", date_labels = "%Y") +
+  scale_y_continuous(labels = comma, breaks = pretty_breaks()) + 
+  theme_classic() +
+  scale_color_viridis_d()
+fig.industries
+```
+
+- Compute return with taking delisting into account
+```{r}
+tbl.crsp_monthly <- tbl.crsp_monthly %>% 
+  mutate(ret_adj = case_when(is.na(dlstcd) ~ ret,
+                             !is.na(dlstcd) & !is.na(dlret) ~ dlret,
+                             dlstcd %in% c(500, 520, 580, 584) | 
+                              (dlstcd >= 551 & dlstcd <= 574) ~ -30,
+                             TRUE ~ -100))
+
+summary(select(tbl.crsp_monthly, ret, ret_adj))
+```
+
+- Market return by CRSP
+```{r}
+tbl.crsp_si <- read_csv(here("input/crsp_si.csv")) 
+colnames(tbl.crsp_si) <- str_to_lower(colnames(tbl.crsp_si))
+
+tbl.crsp_monthly_market <- tbl.crsp_si %>% 
+  transmute(month = floor_date(ymd(date), "month"),
+            vwretd = vwretd * 100,
+            ewretd = ewretd * 100)
+
+tbl.crsp_monthly <- tbl.crsp_monthly_market %>% 
+  left_join(tbl.crsp_monthly, by = "month")
+```
+
+- Risk free returns by French
+```{r, message = FALSE}
+tbl.factors_ff_monthly <-
+  read_csv(here("input/F-F_Research_Data_Factors.csv"),
+           skip = 3,
+           col_types = c("i", "d", "d", "d", "d")) %>% 
+  rename(date = 1) %>% 
+  mutate(digits = floor(log10(date)) + 1) %>% 
+  filter(digits == 6) %>%    # delete yearly data
+  transmute(month = floor_date(ymd(paste0(date, "01")), "month"),
+            rf_ff = as.numeric(RF),
+            mkt_ff = as.numeric(`Mkt-RF`) + as.numeric(RF),
+            smb_ff = as.numeric(SMB),
+            hml_ff = as.numeric(HML))
+
+tbl.crsp_monthly <- tbl.crsp_monthly %>% 
+  left_join(tbl.factors_ff_monthly, by = "month")
+```
+
+- Plot cumulative returns
+```{r}
+tbl.market <- tbl.crsp_monthly %>% 
+  distinct(date, vwretd, ewretd, mkt_ff) %>% 
+  pivot_longer(-date, names_to = "portfolio", values_to = "return") %>%
+  na.omit() %>% 
+  group_by(portfolio) %>% 
+  arrange(date) %>% 
+  mutate(cum_return = cumsum(log(1 + return/100))) %>% 
+  ungroup()
+
+fig.market <- tbl.market %>% 
+  mutate(portfolio = case_when(
+    portfolio == "vwretd" ~ "CRSP (Value-Weighted)",
+    portfolio == "ewretd" ~ "CRSP (Equal-Weighted)",
+    portfolio == "mkt_ff" ~ "MKT (Fama-French)")) %>% 
+  ggplot(aes(x = date, y = cum_return, colour = portfolio)) + 
+  geom_line(size = 1, alpha = .7) +
+  labs(x = NULL, y = NULL, colour = NULL, 
+       title = "Cumulative log return for different market factors") +
+  scale_x_date(expand = c(0, 0), date_breaks = "10 years", date_labels = "%Y") + 
+  scale_y_continuous(labels = percent, breaks = pretty_breaks()) +
+  theme_classic() +
+  scale_color_viridis_d()
+fig.market
+```
+
+- Future return
+    - We cannot simply use `lead()` to creat 1-month future return. This is because some records have jumps in month. For example, if `2020-02-01` has `2020-04-01` as the next record, `lead(month)` wrongly indicate the April return as a one-month future return of the February return. On the other hand, the method below correctly gives `NA` as a one-month future return of the February return. 
+```{r}
+# one way
+tbl.crsp_monthly_f1 <- tbl.crsp_monthly %>%
+  transmute(permno = permno,
+            month = floor_date(date, "month") %m-% months(1),
+            ret_excess_f1 = ret - rf_ff,
+            ret_adj_excess_f1 = ret_adj - rf_ff,
+            mkt_ff_excess_f1 = mkt_ff - rf_ff)
+
+tbl.crsp_monthly <- tbl.crsp_monthly %>%
+  left_join(tbl.crsp_monthly_f1, by = c("permno", "month"))
+```
+
+- Finally, we check the descriptive statistics and save data.
+```{r}
+tbl.crsp_monthly <- tbl.crsp_monthly %>% 
+  arrange(permno, month)
+
+write_rds(tbl.crsp_monthly, here("middle/crsp_monthly.rds"))
+
+summary(tbl.crsp_monthly)
+```
+
+- Now that we saved the data, we clear all objects
+```{r}
+rm(list = ls())
+```
+
+# Part II: Beta and Stock Return
+- In this section, we estimate $beta$ and examine its relation to stock returns.
+- First, we read the data prepared in the previous section and compute thee excess returns
+```{r}
+tbl.crsp_monthly <- read_rds(here("middle/crsp_monthly.rds")) %>% 
+  mutate(ret_adj_excess = ret_adj - rf_ff, 
+         mkt_excess = mkt_ff - rf_ff) %>% 
+  select(permno, month, mkt_excess, ret_adj_excess)
+```
+
+
+## Estimation
+- Now, we estimate beta for all stocks
+```{r}
+# # dtplyr (sequential; slow)
+# system.time(
+# tbl.betas_monthly <- dtplyr::lazy_dt(tbl.crsp_monthly) %>%
+#   group_by(permno) %>%
+#   arrange(month) %>%
+#   mutate(
+#     beta_1y = FamaFrench::rolling_capm_regression(
+#       cur_data(), 
+#       window = 12,
+#       freq = "monthly"),
+#     beta_2y = FamaFrench::rolling_capm_regression(
+#       cur_data(), 
+#       window = 24,
+#       freq = "monthly"),
+#     FamaFrench::rolling_capm_regression(
+#       cur_data(), 
+#       window = 36,
+#       freq = "monthly"),
+#     FamaFrench::rolling_capm_regression(
+#       cur_data(), 
+#       window = 60,
+#       freq = "monthly")) %>%
+#   ungroup() %>% 
+#   collect() %>% 
+#   select(permno, month, starts_with("beta"))
+# )
+```
+
+```{r}
+heavy <- FALSE  # whether to run the heavy computation
+if(heavy == TRUE){
+# parallelized computation
+window_vec <- c(12, 24, 36, 60)
+
+# register
+library(doParallel)
+cl <- parallel::makePSOCKcluster(parallel::detectCores(logical = FALSE))
+doParallel::registerDoParallel(cl)
+
+# computation
+system.time(
+result <- foreach(
+  i = seq_along(window_vec),
+  .packages = c('dplyr', 'purrr', "slider",
+                'FamaFrench','tidyr')
+ ) %dopar% {
+  dtplyr::lazy_dt(tbl.crsp_monthly) %>%
+  group_by(permno) %>%
+  arrange(permno, month) %>%
+  mutate(beta = rolling_capm_regression(cur_data(), 
+                                      window = window_vec[i],
+                                      freq = "monthly"),
+         window = c("1Y", "2Y", "3Y", "5Y")[i]) %>% 
+  ungroup() %>% 
+  collect() %>% 
+  unnest(beta) %>% 
+  select(permno, month, beta, se, window)
+  }
+)
+
+# kill finished tasks
+parallel::stopCluster(cl)
+
+# combine results
+tbl.betas_monthly <- bind_rows(result)
+
+# save the data
+write_rds(tbl.betas_monthly, here("middle/betas_monthly.rds"))
+rm(tbl.betas_monthly)
+}
+```
+
+## Descriptive statistics
+- Now we conduct descriptive analysis of beta.
+```{r}
+tbl.betas_monthly <- read_rds(here("middle/betas_monthly.rds"))
+
+tbl.betas <- read_rds(here("middle/crsp_monthly.rds")) %>% 
+  select(permno, month, ends_with("f1"), 
+         mktcap, mktcap_cpi, exchange) %>% 
+  left_join(tbl.betas_monthly, by = c("permno", "month"))
+
+# wide data that is consistent with the original note
+tbl.betas_wide <- tbl.betas %>% 
+  select(permno, month, beta, window) %>% 
+  pivot_wider(names_from = window,
+              values_from = beta,
+              names_prefix = "beta_")
+
+rm(tbl.betas_monthly)
+```
+
+- Plot the share of stock that are used in beta computation in each month.
+```{r}
+tbl.coverage <- tbl.betas %>% 
+  select(month, permno, beta, window) %>% 
+  group_by(month, window) %>% 
+  summarise(share = n_distinct(permno[!is.na(beta)]) /
+              n_distinct(permno),
+            .groups = "drop") 
+
+fig.coverage <- tbl.coverage %>% 
+  mutate(window = factor(window, 
+                         levels = c("1Y", "2Y", "3Y", "5Y"))) %>% 
+  ggplot(aes(month, share, colour = window)) + 
+  geom_line() +
+  labs(x = NULL, y = NULL, color = NULL, linetype = NULL,
+       title = "Monthly share of stocks with beta estimate") +
+  scale_x_date(expand = c(0, 0), date_breaks = "10 years", 
+               date_labels = "%Y") +
+  scale_y_continuous(labels = percent, breaks = pretty_breaks()) +
+  theme_classic() +
+  scale_color_viridis_d()
+fig.coverage
+```
+- How many of estimates are credible (t-value >= 2.0)?
+```{r}
+tbl.betas %>% 
+  select(month, permno, beta, window, se) %>% 
+  mutate(t_val = beta / se) %>% 
+  na.omit() %>% 
+  group_by(month, window) %>% 
+  summarise(share = n_distinct(abs(t_val) >= 2) / n_distinct(t_val),
+            .groups = "drop") %>% 
+  ggplot(aes(month, share, colour = window)) + 
+  geom_line() +
+  labs(x = NULL, y = NULL, color = NULL, linetype = NULL,
+       title = "Monthly share of stocks with t-value >= 2") +
+  scale_x_date(expand = c(0, 0), date_breaks = "10 years", 
+               date_labels = "%Y") +
+  scale_y_continuous(labels = percent, breaks = pretty_breaks()) +
+  theme_classic() +
+  scale_color_viridis_d()
+```
+
+- Next, we see the distribution of betas
+```{r}
+# time series plot
+tbl.betas %>% 
+  select(permno, month, beta, window) %>% 
+  group_by(month, window) %>% 
+  summarise(beta_mean = mean(beta, na.rm = TRUE),
+            beta_sd = sd(beta, na.rm = TRUE),
+            .groups = "drop") %>% 
+  mutate(upper = beta_mean + 1.96 * beta_sd,
+         lower = beta_mean - 1.96 * beta_sd) %>% 
+  ggplot(aes(month, beta_mean)) + 
+  geom_line() +
+  geom_hline(yintercept = 0, lty = 2) +
+  geom_ribbon(aes(ymax = upper, ymin = lower), alpha = .5) +
+  facet_wrap(~ window, scales = "free") +
+  theme_classic()
+```
+
+```{r}
+# Histogram
+tbl.betas %>% 
+  select(permno, month, beta, window) %>% 
+  ggplot(aes(x = beta, fill = window)) +
+  geom_density(alpha = .7) + 
+  coord_cartesian(xlim = c(-2, 4)) +
+  scale_x_continuous(breaks = pretty_breaks()) +
+  facet_wrap(~window) +
+  theme_classic()
+```
+- Now, the descriptive statistics.
+    - The reason why 5-year window has more `n` than 3-year window is that we do not require monthly data to be consecutive. 
+    - If there is a jump in the monthly return data used in the regression, as the horizon gets longer, it is more likely to satisfied the sample size requirement (>24). 
+```{r}
+# Descriptive stat
+tbl.betas_ts <- tbl.betas %>% 
+  select(month, beta, window) %>% 
+  group_by(window, month) %>% 
+  na.omit() %>% 
+  summarise(mean = mean(beta),
+            sd = sd(beta),
+            skew = skewness(beta),
+            kurt = kurtosis(beta),
+            min = min(beta),
+            q05 = quantile(beta, 0.05),
+            q25 = quantile(beta, 0.25),
+            q50 = quantile(beta, 0.50),
+            q75 = quantile(beta, 0.75),
+            q95 = quantile(beta, 0.95),
+            max = max(beta),
+            n = n(),
+            .groups = "drop")
+
+# summarise across month
+tbl.betas_summary <- tbl.betas_ts %>% 
+  select(-month) %>% 
+  group_by(window) %>% 
+  summarise(across(.cols = everything(),
+                   .fns = ~mean(.x),
+                   na.rm = TRUE),
+            .groups = "drop") %>% 
+  mutate(window = factor(window, 
+                         levels = c("1Y", "2Y", "3Y", "5Y"))) %>% 
+  arrange(window) %>% 
+  kable(digits = 2) %>% 
+  kable_styling(bootstrap_options = 
+                  c("striped", "hover", "condensed", "responsive"))
+tbl.betas_summary
+```
+
+- Sanity check
+```{r}
+# Months that have more n for 5Y than 3Y
+tbl.betas_ts %>% filter(window %in% c("3Y", "5Y")) %>% select(window, month, n) %>% arrange(month, window) %>% pivot_wider(names_from = window, values_from = n) %>% filter(`3Y` != `5Y`)
+
+# Look at one example of such month
+tbl.betas %>% 
+  select(permno, month, beta, window) %>% 
+  pivot_wider(id_cols = c(permno, month),
+              names_from = window,
+              values_from = beta) %>% 
+  filter(month == ymd("1931-04-01")) %>% 
+  select(permno, month, `3Y`, `5Y`)
+
+tbl.betas %>% filter(permno == 11180, month == ymd("1931-04-01"))
+
+# Look at one firm
+x <- tbl.crsp_monthly %>% 
+  filter(permno == 11180, month <= ymd("1931-04-01"))
+```
+
+
+## Correlations
+- We see cross-sectional correlations between each window of beta
+```{r}
+tbl.correlations  <- tbl.betas_wide %>% 
+  select(-permno) %>% 
+  na.omit() %>% 
+  group_by(month) %>% 
+  nest(betas = starts_with("beta")) %>% 
+  mutate(correlations = map(betas,
+                            FamaFrench::compute_correlation)) %>% 
+  ungroup() %>% 
+  select(-betas) %>% 
+  unnest(correlations) %>% 
+  rename(type = term) %>% 
+  mutate(type = factor(type, 
+                       levels = paste0("beta_", c(1, 2, 3, 5), "Y"))) %>% 
+  group_by(type) %>% 
+  summarise(across(starts_with("beta"), mean,
+                   na.rm = TRUE))
+
+options(knitr.kable.NA = '')
+tab.correlations <- tbl.correlations %>% 
+  kable(digits = 2) %>% 
+  kable_styling(bootstrap_options = 
+                  c("striped", "hover", "condensed", "responsive"))
+tab.correlations
+```
+
+## Persistence
+- We compute the correlation with $\tau$ months of lag.
+```{r}
+vec.tau <- c(1, 3, 6, 12, 24, 36, 48, 60, 120)
+
+# for all beta
+beta_vec <- "beta_" %+% c(1, 2, 3, 5) %+% "Y"
+
+## garbage collection
+gc()
+
+## register
+library(doParallel)
+options(future.globals.maxSize = 1.6 * 1024^3)  # 1.5Gb
+cl <- parallel::makePSOCKcluster(4)
+doParallel::registerDoParallel(cl)
+
+result <- foreach(
+    i = seq_along(beta_vec),
+    .packages = c('dplyr', 'purrr', 'tidyr',
+                  'FamaFrench','corrr',
+                  'lubridate', 'matsuno')
+  ) %dopar% {
+    compute_persistence(tbl.betas_wide, !!sym(beta_vec[i]), vec.tau,
+                        probs = c(.005, .995))
+  }
+
+## kill finished tasks
+parallel::stopCluster(cl)
+
+# bind the result
+tab.persistence <- reduce(result, left_join, by = "tau") %>% 
+  kable(digits = 2) %>% 
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+tab.persistence
+```
+
+## Portfolio Analysis
+- Does beta positively associated with future returns, as the CAPM predicts?
+
+
