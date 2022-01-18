@@ -4,7 +4,7 @@
 \alias{quibble}
 \title{Returns quantile of each grouped variable}
 \usage{
-quibble(x, q)
+quibble(x, n_portfolios)
 }
 \arguments{
 \item{x}{variable}

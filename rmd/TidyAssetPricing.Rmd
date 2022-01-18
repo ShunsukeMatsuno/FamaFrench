@@ -13,6 +13,16 @@ knitr::opts_chunk$set(echo = TRUE)
 # Introduction
 This note is a replication of [Tidy Asset Pricing](https://christophscheuch.github.io/post/asset-pricing/crsp-sample/) by Christoph Scheuch.
 
+- Here is the options that run through the entire note
+```{r}
+# conducts heavy (> 1hr) computation
+heavy <- FALSE   
+
+# restrict sample until Dec 2019, consistent with
+# the original note
+sample_restrict <- FALSE   
+```
+
 # Part I: The CRSP Sample 
 - Packages
 ```{r}
@@ -253,7 +263,7 @@ summary(tbl.crsp_monthly)
 
 - Now that we saved the data, we clear all objects
 ```{r}
-rm(list = ls())
+rm(tbl.crsp_monthly, tbl.crsp_monthly_f1)
 ```
 
 # Part II: Beta and Stock Return
@@ -299,8 +309,7 @@ tbl.crsp_monthly <- read_rds(here("middle/crsp_monthly.rds")) %>%
 ```
 
 ```{r}
-heavy <- FALSE  # whether to run the heavy computation
-if(heavy == TRUE){
+if(heavy){
 # parallelized computation
 window_vec <- c(12, 24, 36, 60)
 
@@ -346,8 +355,17 @@ rm(tbl.betas_monthly)
 - Now we conduct descriptive analysis of beta.
 ```{r}
 tbl.betas_monthly <- read_rds(here("middle/betas_monthly.rds"))
+tbl.crsp_monthly <- read_rds(here("middle/crsp_monthly.rds"))
+                             
+if(sample_restrict){
+  tbl.betas_monthly <- tbl.betas_monthly %>% 
+    filter(month <= ymd("2019-12-31"))
+  
+  tbl.crsp_monthly <- tbl.crsp_monthly %>% 
+    filter(month <= ymd("2019-12-31"))
+}
 
-tbl.betas <- read_rds(here("middle/crsp_monthly.rds")) %>% 
+tbl.betas <- tbl.crsp_monthly %>% 
   select(permno, month, ends_with("f1"), 
          mktcap, mktcap_cpi, exchange) %>% 
   left_join(tbl.betas_monthly, by = c("permno", "month"))
@@ -565,4 +583,68 @@ tab.persistence
 ## Portfolio Analysis
 - Does beta positively associated with future returns, as the CAPM predicts?
 
+- We construct portfolios based on estimated betas.
+    - Specifically, for stock of company $i$ at time (month) $t$, we estimated beta using the past $j \in \{1, 2, 3, 5\}$ years of data. 
+    - Then, for each month and the estimation window $j$, we computed the quantiles to divide the pool of betas in that month and window to portfolios of size `n_portfolios`. 
+```{r}
+tbl.portfolios <-
+  construct_univariate_portfolios(tbl.betas,
+                                  nyse_breakpoints = TRUE)
+```
+
+- Given the portfolio returns, we test whether the portfolio's return is statistically different from zero.
+    - We estimate the mean excess reutnr and the CAPM alpha for each portfolio.
+    - We use Newey and West (1987) $t$-stat with $6$ lags to correct for the serial correlation.
+```{r}
+# Table: Equal weighted
+tab.portfolio_returns_ew <- 
+  estimate_portfolio_returns(tbl.portfolios, ret_ew) %>%
+  reshape_portfolio_returns() %>% 
+  kable(digits = 2) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive")) %>%
+  pack_rows("Estimation Period: 1 Year (Monthly Data) - Equal-Weighted Portfolio Returns", 1, 4) %>%
+  pack_rows("Estimation Period: 2 Years (Monthly Data) - Equal-Weighted Portfolio Returns", 5, 8) %>%
+  pack_rows("Estimation Period: 3 Years (Monthly Data) - Equal-Weighted Portfolio Returns", 9, 12) %>%
+  pack_rows("Estimation Period: 5 Years (Monthly Data) - Equal-Weighted Portfolio Returns", 13, 16) 
+tab.portfolio_returns_ew
+
+# Table: Value weighted
+tab.portfolio_returns_vw <- 
+  estimate_portfolio_returns(tbl.portfolios, ret_vw) %>%
+  reshape_portfolio_returns() %>% 
+  kable(digits = 2) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive")) %>%
+  pack_rows("Estimation Period: 1 Year (Monthly Data) - Value-Weighted Portfolio Returns", 1, 4) %>%
+  pack_rows("Estimation Period: 2 Years (Monthly Data) - Value-Weighted Portfolio Returns", 5, 8) %>%
+  pack_rows("Estimation Period: 3 Years (Monthly Data) - Value-Weighted Portfolio Returns", 9, 12) %>%
+  pack_rows("Estimation Period: 5 Years (Monthly Data) - Value-Weighted Portfolio Returns", 13, 16) 
+tab.portfolio_returns_vw
+```
+
+- Graphical Result
+```{r}
+# Equal-weighted
+estimate_portfolio_returns(tbl.portfolios, ret_ew) %>% 
+  ggplot(aes(x = portfolio, y = estimate, colour = window)) +
+  geom_point(aes(shape = window), size = 2) +
+  geom_errorbar(aes(ymax = estimate + 1.96 * (estimate / nw_tstat),
+                    ymin = estimate - 1.96 * (estimate / nw_tstat))) +
+  geom_hline(yintercept = 0, lty = 2) +
+  facet_wrap(~ type) +
+  theme_classic() +
+  scale_colour_viridis_d() + 
+  ggtitle("Equal-weighted")
+
+# Value-weighted
+estimate_portfolio_returns(tbl.portfolios, ret_vw) %>% 
+  ggplot(aes(x = portfolio, y = estimate, colour = window)) +
+  geom_point(aes(shape = window), size = 2) +
+  geom_errorbar(aes(ymax = estimate + 1.96 * (estimate / nw_tstat),
+                    ymin = estimate - 1.96 * (estimate / nw_tstat))) +
+  geom_hline(yintercept = 0, lty = 2) +
+  facet_wrap(~ type) +
+  theme_classic() +
+  scale_colour_viridis_d() + 
+  ggtitle("Value-weighted")
+```
 
