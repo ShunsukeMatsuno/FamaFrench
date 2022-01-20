@@ -206,7 +206,7 @@ estimate_portfolio_returns <- function(data, ret, n_portfolios = 10,
 #' @export
 #'
 #' @examples
-reshape_portfolio_returns <- function(x){
+reshape_portfolio_returns <- function(x, n_portfolios = 10){
   average_ret <- x %>% 
     filter(type == "excess return") %>% 
     select(-type)
