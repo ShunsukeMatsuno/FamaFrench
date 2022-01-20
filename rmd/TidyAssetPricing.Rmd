@@ -351,6 +351,52 @@ rm(tbl.betas_monthly)
 }
 ```
 
+
+- For the monthly data, using `{roll}` package is much faster.
+```{r}
+# parallelized computation
+window_vec <- c(12, 24, 36, 60)
+
+# register
+library(doParallel)
+cl <- parallel::makePSOCKcluster(parallel::detectCores(logical = FALSE))
+doParallel::registerDoParallel(cl)
+
+system.time(
+result <- foreach(
+  i = seq_along(window_vec),
+  .packages = c('dplyr', 'purrr', "slider",
+                'FamaFrench','tidyr', 'roll')
+  ) %dopar% {
+    tbl.crsp_monthly %>% 
+      group_by(permno) %>%
+      arrange(permno, month) %>%
+      summarise(
+        roll_rolling_capm_regression(
+          cur_data(),
+          window = window_vec[i],
+          freq = "monthly"),
+        window = c("1Y", "2Y", "3Y", "5Y")[i],
+        month = month,
+        mkt_excess = mkt_excess,
+        ret_adj_excess = ret_adj_excess,
+        .groups = "drop") %>% 
+      ungroup()
+  }
+)
+
+# kill finished tasks
+parallel::stopCluster(cl)
+
+# combine results
+tbl.betas_monthly <- bind_rows(result)
+
+# save the data
+write_rds(tbl.betas_monthly, here("middle/betas_monthly.rds"))
+rm(tbl.betas_monthly, result)
+```
+
+
 ## Descriptive statistics
 - Now we conduct descriptive analysis of beta.
 ```{r}
@@ -601,7 +647,7 @@ tab.portfolio_returns_ew <-
   estimate_portfolio_returns(tbl.portfolios, ret_ew) %>%
   reshape_portfolio_returns() %>% 
   kable(digits = 2) %>%
-  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensxed", "responsive")) %>%
   pack_rows("Estimation Period: 1 Year (Monthly Data) - Equal-Weighted Portfolio Returns", 1, 4) %>%
   pack_rows("Estimation Period: 2 Years (Monthly Data) - Equal-Weighted Portfolio Returns", 5, 8) %>%
   pack_rows("Estimation Period: 3 Years (Monthly Data) - Equal-Weighted Portfolio Returns", 9, 12) %>%
@@ -647,4 +693,6 @@ estimate_portfolio_returns(tbl.portfolios, ret_vw) %>%
   scale_colour_viridis_d() + 
   ggtitle("Value-weighted")
 ```
+
+## Regression Analysis
 
