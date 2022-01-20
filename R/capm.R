@@ -59,3 +59,40 @@ rolling_capm_regression <- function(x, window, freq){
                       .before = (window - 1), .complete = FALSE)
   return(out)
 }
+
+#' Rolling capm regressoin using {roll} package
+#'
+#' @param x 
+#' @param window 
+#' @param freq 
+#'
+#' @return
+#' @export
+#' 
+#' @details We can use {roll} package for monthly data, but not for 
+#' daily data. For daily data, we have to slide within a month, which
+#' makes the use of `slider::slide_period` essential.
+#' 
+#' @examples
+roll_rolling_capm_regression <- function(data, window, freq){
+  if(freq == "daily"){
+    stop("This function cannot be used for daily frequency")
+  }
+  
+  # Determine the minimum # of obs to estimate beta
+  if(freq == "monthly"){
+    if (window == 12) {check <- 10}
+    if (window == 24) {check <- 20}
+    if (window == 36) {check <- 24}
+    if (window == 60) {check <- 24}
+  }
+  
+  reg <- roll::roll_lm(y = data$ret_adj_excess,
+                       x = data$mkt_excess, 
+                       width = window, 
+                       min_obs = check)
+  return(
+    tibble(beta =reg$coefficients[,2],
+           se = reg$std.error[,2])
+  )
+}
