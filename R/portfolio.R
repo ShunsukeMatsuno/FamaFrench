@@ -237,3 +237,107 @@ reshape_portfolio_returns <- function(x, n_portfolios = 10){
   }
   return(reduce(out, rbind))
 }
+
+#' Fama-Macbeth regression
+#'
+#' @param data 
+#' @param model_name 
+#'
+#' @return
+#' @export
+#'
+#' @examples
+fama_macbeth_regression <- function(data, model_name = "value"){
+  # Prepare and winsorize data
+  data_nested <- data %>% 
+    filter(!is.na(beta), !is.na(ret_adj_excess_f1)) %>% 
+    mutate(beta = DescTools::Winsorize(beta, probs = c(0.005, 0.995))) %>% 
+    nest(reg_data = -c(month, window))
+  
+  # Perform cross-sectional regression for each month
+  cross_sectional_regs <- data_nested %>% 
+    mutate(model = map(reg_data, ~lm(ret_adj_excess_f1 ~ beta,
+                                     data = .x))) %>% 
+    mutate(tidy = map(model, tidy),
+           glance = map(model, glance),
+           n = map_int(model, nobs))
+  
+  # Extract average coefficient and compute se
+  fama_macbeth_coefs <- cross_sectional_regs %>% 
+    unnest(tidy) %>% 
+    group_by(term, window) %>% 
+    summarise(coef = mean(estimate),
+              se_std = sqrt(var(estimate)/n()),
+              .groups = "drop") 
+  
+  # Compute NW se
+  fama_macbeth_nw_se <- cross_sectional_regs %>% 
+    unnest(tidy) %>% 
+    select(month, window, term, estimate) %>% 
+    group_by(term, window) %>% 
+    arrange(month, window) %>% 
+    nest(data_nw = c(month, estimate)) %>% 
+    mutate(se_nw = map_dbl(data_nw,
+                           ~ sqrt(diag(NeweyWest(
+                             lm(estimate ~ 1, data = .x),
+                             lag = 6))))) %>% 
+    select(-data_nw)
+  
+  # Extract R2 and n()
+  fama_macbeth_stats <- cross_sectional_regs %>% 
+    unnest(glance) %>% 
+    group_by(window) %>% 
+    summarise(R2 = mean(adj.r.squared),
+              n = mean(n)) %>% 
+    pivot_longer(c(R2, n), names_to = "static", values_to = model_name)
+  
+  
+  # Combine them together 
+  out <- left_join(fama_macbeth_coefs, fama_macbeth_nw_se,
+                   by = c("window", "term")) %>% 
+    mutate(model = "FM")
+  return(list(coefs = out, stats = fama_macbeth_stats))
+}
+
+
+
+#' Fixed effect regression of future return on beta
+#'
+#' @param data 
+#' @param model_name 
+#'
+#' @return
+#' @export
+#'
+#' @examples
+fe_regression <- function(data, model_name = "value"){
+  # Prepare and winsorize data
+  data_nested <- data %>% 
+    filter(!is.na(beta), !is.na(ret_adj_excess_f1)) %>% 
+    mutate(beta = DescTools::Winsorize(beta, probs = c(0.005, 0.995))) %>% 
+    group_by(window) %>% 
+    arrange(month) %>% 
+    ungroup() %>% 
+    nest(reg_data = -c(window)) 
+  
+  # Regression
+  fe_reg_res <- data_nested %>% 
+    mutate(reg_res = map(reg_data, ~fixest::feols(ret_adj_excess_f1 ~ beta,
+                                                  data = .x))) %>% 
+    mutate(coefs = map(reg_res, tidy)) %>% 
+    unnest(coefs) %>% 
+    select(window, reg_res, term, coef = estimate)
+  
+  # Extract se
+  fe_extract_se <- function(x, cluster){
+    summary(x, cluster = cluster)$se[2]
+  }
+  
+  fe_reg_res <- fe_reg_res %>% 
+    mutate(se_i = map_dbl(reg_res, fe_extract_se, cluster = "permno"),
+           se_t = map_dbl(reg_res, fe_extract_se, cluster = "month"),
+           se_it = map_dbl(reg_res, fe_extract_se, cluster = c("permno", "month"))) %>% 
+    select(-reg_res) %>% 
+    mutate(mode = "fe")
+  return(fe_reg_res)
+}
