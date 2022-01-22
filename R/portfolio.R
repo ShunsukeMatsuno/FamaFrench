@@ -322,6 +322,14 @@ fe_regression <- function(data, model_name = "value"){
   
   # Regression
   fe_reg_res <- data_nested %>% 
+    mutate(reg_i = map(reg_data, ~fixest::feols(ret_adj_excess_f1 ~ beta, .x,
+                                                cluster = "permno")),
+           reg_t = map(reg_data, ~fixest::feols(ret_adj_excess_f1 ~ beta, .x,
+                                                cluster = "month")),
+           reg_it = map(reg_data, ~fixest::feols(ret_adj_excess_f1 ~ beta, .x,
+                                                 cluster = c("month", "permno"))))
+  # Regression
+  fe_reg_res <- data_nested %>% 
     mutate(reg_res = map(reg_data, ~fixest::feols(ret_adj_excess_f1 ~ beta,
                                                   data = .x))) %>% 
     mutate(coefs = map(reg_res, tidy)) %>% 
