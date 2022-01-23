@@ -312,40 +312,23 @@ fama_macbeth_regression <- function(data, model_name = "value"){
 #' @examples
 fe_regression <- function(data, model_name = "value"){
   # Prepare and winsorize data
-  data_nested <- data %>% 
+  data_reg <- data %>% 
     filter(!is.na(beta), !is.na(ret_adj_excess_f1)) %>% 
     mutate(beta = DescTools::Winsorize(beta, probs = c(0.005, 0.995))) %>% 
     group_by(window) %>% 
     arrange(month) %>% 
-    ungroup() %>% 
-    nest(reg_data = -c(window)) 
+    ungroup() 
   
   # Regression
-  fe_reg_res <- data_nested %>% 
-    mutate(reg_i = map(reg_data, ~fixest::feols(ret_adj_excess_f1 ~ beta, .x,
-                                                cluster = "permno")),
-           reg_t = map(reg_data, ~fixest::feols(ret_adj_excess_f1 ~ beta, .x,
-                                                cluster = "month")),
-           reg_it = map(reg_data, ~fixest::feols(ret_adj_excess_f1 ~ beta, .x,
-                                                 cluster = c("month", "permno"))))
-  # Regression
-  fe_reg_res <- data_nested %>% 
-    mutate(reg_res = map(reg_data, ~fixest::feols(ret_adj_excess_f1 ~ beta,
-                                                  data = .x))) %>% 
-    mutate(coefs = map(reg_res, tidy)) %>% 
-    unnest(coefs) %>% 
-    select(window, reg_res, term, coef = estimate)
+  reg_est <- data_reg %>% 
+    feols(ret_adj_excess_f1~ beta, data = ., split = ~window) 
+  my_cluster = list("month", "permno", c("month", "permno"))
+  # my_cluster = list("standard", "month", "permno", c("month", "permno")) # fixest issue #258
+  reg_est_table <- etable(rep(.l(reg_est), each = 3, cluster = my_cluster),
+                          headers = list("1Y" = length(my_cluster),
+                                      "2Y" = length(my_cluster),
+                                      "3Y" = length(my_cluster),
+                                      "5Y" = length(my_cluster)))
   
-  # Extract se
-  fe_extract_se <- function(x, cluster){
-    summary(x, cluster = cluster)$se[2]
-  }
-  
-  fe_reg_res <- fe_reg_res %>% 
-    mutate(se_i = map_dbl(reg_res, fe_extract_se, cluster = "permno"),
-           se_t = map_dbl(reg_res, fe_extract_se, cluster = "month"),
-           se_it = map_dbl(reg_res, fe_extract_se, cluster = c("permno", "month"))) %>% 
-    select(-reg_res) %>% 
-    mutate(mode = "fe")
-  return(fe_reg_res)
+  return(reg_est_table)
 }
